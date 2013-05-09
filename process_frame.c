@@ -13,12 +13,17 @@
 #include <stdlib.h>
 
 OSC_ERR OscVisDrawBoundingBoxBW(struct OSC_PICTURE *picIn, struct OSC_VIS_REGIONS *regions, uint8 Color);
+int otsuThreshold(uint32 *hist, int siz);
+int nThreshold;
 
 void ProcessFrame(uint8 *pInputImg)
 {
 	int c, r;
 	int nc = OSC_CAM_MAX_IMAGE_WIDTH/2;
 	int siz = sizeof(data.u8TempImage[GRAYSCALE]);
+
+	uint32 hist[256];
+	uint8* p= data.u8TempImage[GRAYSCALE];
 
 	int Shift = 7;
 	short Beta = 2;//the meaning is that in floating point the value of Beta is = 6/(1 << Shift) = 6/128 = 0.0469
@@ -27,65 +32,35 @@ void ProcessFrame(uint8 *pInputImg)
 	struct OSC_PICTURE Pic1, Pic2;//we require these structures to use Oscar functions
 	struct OSC_VIS_REGIONS ImgRegions;//these contain the foreground objects
 
-	if(data.ipc.state.nStepCounter == 1)
-	{
-		/* this is the first time we call this function */
-		/* first time we call this; index 1 always has the background image */
-		memcpy(data.u8TempImage[BACKGROUND], data.u8TempImage[GRAYSCALE], sizeof(data.u8TempImage[GRAYSCALE]));
-		/* set foreground counter to zero */
-		memset(data.u8TempImage[FGRCOUNTER], 0, sizeof(data.u8TempImage[FGRCOUNTER]));
-	}
-	else
-	{
+
+
+	    memset(hist,0,sizeof(hist));
+	    for(int i=0;i< siz;i++){
+	    	hist[p[i]]+=1;
+	    }
+	   nThreshold = otsuThreshold(hist,siz);
 		/* this is the default case */
 		for(r = 0; r < siz; r+= nc)/* we strongly rely on the fact that them images have the same size */
 		{
 			for(c = 0; c < nc; c++)
 			{
 				/* first determine the foreground estimate */
-				data.u8TempImage[THRESHOLD][r+c] = abs((short) data.u8TempImage[GRAYSCALE][r+c]-(short) data.u8TempImage[BACKGROUND][r+c]) < data.ipc.state.nThreshold ? 0 : 0xff;
+				//data.u8TempImage[THRESHOLD][r+c] =(short) data.u8TempImage[GRAYSCALE][r+c] < data.ipc.state.nThreshold ? 0 : 0xff;
+				data.u8TempImage[THRESHOLD][r+c] =(short) data.u8TempImage[GRAYSCALE][r+c] < nThreshold ? 0 : 0xff;
 
-				/* now depending on the foreground estimate ... */
-				if(data.u8TempImage[THRESHOLD][r+c]) {
-					/* ... either in case foreground is detected -> do not update the background but increase the foreground counter */
-					if(data.u8TempImage[FGRCOUNTER][r+c] < MaxForeground) {
-						data.u8TempImage[FGRCOUNTER][r+c]++;
-					} else {
-						/* if counter reaches max -> set current image to background */
-						data.u8TempImage[FGRCOUNTER][r+c] = 0;
-						data.u8TempImage[BACKGROUND][r+c] = data.u8TempImage[GRAYSCALE][r+c];
-					}
-				} else {/* ...or in case background is detected -> decrease foreground counter and update background as usual */					
-					if(0 < data.u8TempImage[FGRCOUNTER][r+c]) {
-						data.u8TempImage[FGRCOUNTER][r+c]--;
-					}
-					/* now update the background image; the value of background should be corrected by the following difference (* 1/128) */
-					short Diff = Beta*((short) data.u8TempImage[GRAYSCALE][r+c] - (short) data.u8TempImage[BACKGROUND][r+c]);
 
-					if(abs(Diff) >= 128) //we will have a correction - apply it (this also avoids the "bug" that -1 >> 1 = -1)
-						data.u8TempImage[BACKGROUND][r+c] = (uint8) ((short) data.u8TempImage[BACKGROUND][r+c] + (Diff >> Shift));//first cast to (short) because Diff can be negative then cast to uint8
-																																  //we do no explicit min(255, max(0, ** )) statement; this should not happen
-					else //due to the division by 128 the correction would be zero -> thus add/subtract at least unity
-					{
-						if(Diff > 0 && data.u8TempImage[BACKGROUND][r+c] < 255)
-								data.u8TempImage[BACKGROUND][r+c] += 1;
-						else if(Diff < 0 && data.u8TempImage[BACKGROUND][r+c] > 1)
-								data.u8TempImage[BACKGROUND][r+c] -= 1;
-					}
-				}
-			}
+		}
 		}
 
-		/*
+     /*
 		{
 			//for debugging purposes we log the background values to console out
 			//we chose the center pixel of the image (adaption to other pixel is straight forward)
 			int offs = nc*(OSC_CAM_MAX_IMAGE_HEIGHT/2)/2+nc/2;
 
-			OscLog(INFO, "%d %d %d %d %d\n", (int) data.u8TempImage[GRAYSCALE][offs], (int) data.u8TempImage[BACKGROUND][offs], (int) data.u8TempImage[BACKGROUND][offs]-data.ipc.state.nThreshold,
-											 (int) data.u8TempImage[BACKGROUND][offs]+data.ipc.state.nThreshold, (int) data.u8TempImage[FGRCOUNTER][offs]);
+			OscLog(INFO, "%d %d %d %d %d\n", hist[50], hist[150], hist[250], hist[100], nThreshold);
 		}
-		*/
+       */
 
 		for(r = nc; r < siz-nc; r+= nc)/* we skip the first and last line */
 		{
@@ -132,7 +107,7 @@ void ProcessFrame(uint8 *pInputImg)
 		OscVisDrawBoundingBoxBW( &Pic2, &ImgRegions, 255);
 		OscVisDrawBoundingBoxBW( &Pic1, &ImgRegions, 128);
 	}
-}
+
 
 
 /* Drawing Function for Bounding Boxes; own implementation because Oscar only allows colored boxes; here in Gray value "Color"  */
@@ -161,4 +136,30 @@ OSC_ERR OscVisDrawBoundingBoxBW(struct OSC_PICTURE *picIn, struct OSC_VIS_REGION
 	 return SUCCESS;
 }
 
+int otsuThreshold(uint32 *hist, int siz){
+	int w0,w1,m0,m1,k_best=0;
+	float sigma_b_sqware_best=0;
+	float sigma_b_sqwared_new=0;
+	for(int k=0;k<256;k++){
+		w0=0;
+		w1=0;
+		m1=0;
+		m0=0;
+		for(int g=0;g<k;g++){
+			m0 += hist[g]*g;
+			w0 += hist[g];
+		}
+		for(int g=k;g<256;g++){
+			m1 += hist[g]*g;
+			w1 += hist[g];
+		}
+		sigma_b_sqwared_new= w0*w1*(m0/(float)w0-m1/(float)w1)*(m0/(float)w0-m1/(float)w1);
+		if(sigma_b_sqwared_new >= sigma_b_sqware_best){
+			sigma_b_sqware_best=sigma_b_sqwared_new;
+			k_best=k;
+		}
+	}
 
+	return k_best;
+
+}
